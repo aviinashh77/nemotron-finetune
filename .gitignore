@@ -22,7 +22,9 @@ outputs/*/scheduler.pt
 outputs/*/rng_state.pth
 
 # Logs (regenerable)
-*.log
+logs_mamba_build.log
+logs_pip_install.log
+run_output.log
 
 # IDE
 .vscode/

@@ -1,0 +1,11 @@
+{
+  "train_metrics": {
+    "train_runtime": 168.1165,
+    "train_samples_per_second": 0.059,
+    "train_steps_per_second": 0.024,
+    "total_flos": 152453040473088.0,
+    "train_loss": 6.315846025943756
+  },
+  "elapsed_seconds": 174.15,
+  "config_path": "/workspace/nemotron-finetune/configs/sft_sample.yaml"
+}

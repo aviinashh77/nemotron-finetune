@@ -1,0 +1,75 @@
+run:
+  mode: sft
+  name: sft_sample_5dp_2ep
+  output_dir: outputs/sft_sample_5dp_2ep
+  config_path: /workspace/nemotron-finetune/configs/sft_sample.yaml
+model:
+  path: /workspace/models/nemotron-nano-30b
+  size: nano
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  use_cache: false
+  use_mamba_kernels: false
+quantization:
+  enabled: false
+  bits: 4
+  quant_type: nf4
+  compute_dtype: bfloat16
+  double_quant: false
+lora:
+  enabled: true
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - up_proj
+  - down_proj
+  - in_proj
+  - out_proj
+  bias: none
+  task_type: CAUSAL_LM
+data:
+  train_path: data/dummy/sample_chat_5.json
+  eval_path: null
+  format: chat
+  max_seq_length: 1024
+  packing: false
+  num_proc: 1
+training:
+  output_dir: outputs/sft_sample_5dp_2ep
+  num_train_epochs: 2
+  max_steps: -1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 0.0002
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  logging_steps: 1
+  save_steps: 500
+  save_total_limit: 2
+  eval_strategy: false
+  eval_steps: 500
+  seed: 42
+  dataloader_num_workers: 0
+  gradient_checkpointing: true
+  optim: paged_adamw_8bit
+checkpointing:
+  enabled: true
+  dir: outputs/sft_sample_5dp_2ep/checkpoints
+validation:
+  enabled: false
+wandb:
+  mode: disabled
+  project: nemotron-finetune
+  run_name: sft_sample_5dp_2ep
+logging:
+  level: INFO
