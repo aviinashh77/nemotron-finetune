@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Training outputs (keep structure, ignore weights/logs)
+outputs/*/adapter_model.safetensors
+outputs/*/checkpoint-*/
+outputs/*/training_args.bin
+outputs/*/optimizer.pt
+outputs/*/scheduler.pt
+outputs/*/rng_state.pth
+
+# Logs (regenerable)
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HuggingFace cache
+.cache/
+
+# Model weights (large, use HF Hub or local paths)
+models/
+
+# Torch cache
+torch-cache/
