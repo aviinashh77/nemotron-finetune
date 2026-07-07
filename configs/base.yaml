@@ -1,0 +1,77 @@
+# ── base.yaml ─── all defaults for a nemotron-finetune run ──────────────
+# User configs are deep-merged on top of this file.
+
+run:
+  mode: sft               # cpt | dapt | sft
+  name: base_run
+  output_dir: outputs/base_run
+
+model:
+  path: null              # REQUIRED – local path or HF repo id
+  size: nano              # nano | super | ultra
+  torch_dtype: bfloat16
+  attn_implementation: flash_attention_2
+  use_cache: false
+
+quantization:
+  enabled: false
+  bits: 4
+  quant_type: nf4
+  compute_dtype: bfloat16
+  double_quant: false
+
+lora:
+  enabled: true
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: all-linear
+  bias: none
+  task_type: CAUSAL_LM
+
+data:
+  train_path: null        # REQUIRED – path to training data (json/jsonl)
+  eval_path: null         # optional – path to eval data
+  format: chat            # text | chat | prompt_completion
+  max_seq_length: 2048
+  packing: false
+  num_proc: 4
+
+training:
+  output_dir: ${run.output_dir}
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  logging_steps: 1
+  save_steps: 500
+  save_total_limit: 3
+  eval_strategy: no
+  eval_steps: 500
+  seed: 42
+  dataloader_num_workers: 4
+  gradient_checkpointing: true
+  optim: paged_adamw_8bit
+
+checkpointing:
+  enabled: true
+  dir: ${run.output_dir}/checkpoints
+
+validation:
+  enabled: false
+
+wandb:
+  mode: disabled          # online | offline | disabled
+  project: nemotron-finetune
+  run_name: ${run.name}
+
+logging:
+  level: INFO
