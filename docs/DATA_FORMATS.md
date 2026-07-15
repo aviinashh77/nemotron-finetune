@@ -169,6 +169,29 @@ Both formats are supported. JSONL is recommended for large datasets as it allows
 3. No null values in message content
 4. File must be valid JSON or JSONL
 5. Character encoding: UTF-8
+6. **Filter long samples** — Samples >30k chars (~10k tokens) should be filtered to avoid slow tokenization and OOM
+
+### Filtering long samples
+
+Some datasets (especially code corpora) contain extremely long samples that cause:
+- Slow tokenization (minutes per sample)
+- Memory issues during training
+- Wasted compute (truncated to `max_seq_length` anyway)
+
+```python
+import json
+
+MAX_CHARS = 30000  # ~10k tokens
+
+with open("data/train.json") as f:
+    data = json.load(f)
+
+filtered = [d for d in data if len(d.get("text", "")) <= MAX_CHARS]
+print(f"Filtered: {len(data)} → {len(filtered)} ({100*len(filtered)/len(data):.1f}%)")
+
+with open("data/train_filtered.json", "w") as f:
+    json.dump(filtered, f)
+```
 
 ### Example script to validate data
 
@@ -191,3 +214,28 @@ print(f"Validated {len(data)} examples")
 ## Sample Data
 
 A sample dataset with 5 chat examples is included at `data/dummy/sample_chat_5.json` for testing.
+
+## Verilog HDL Data
+
+The Verilog CPT project uses text-format data derived from `verilog_db_v0.1.jsonl`:
+
+```python
+# Source: verilog_db_v0.1.jsonl — 38,417 Verilog modules
+# Each line: {"code": "module foo(...); ... endmodule", "metadata": {...}}
+
+# Convert to training format:
+data = [{"text": d["code"]} for d in source_data]
+
+# Split: 37,417 train + 1,000 val
+# Filter: remove samples >30k chars (~10k tokens)
+# Final: 36,321 train + 971 val
+```
+
+**Data stats:**
+- Median: 686 chars (~200 tokens)
+- P90: 7,689 chars (~2,300 tokens)
+- P95: 18,428 chars (~5,500 tokens)
+- Max (filtered): 29,754 chars (~8,900 tokens)
+- Unfiltered max: 55,601,430 chars (~16M tokens!) — must be filtered
+
+**Filter threshold:** 30,000 chars (~10,000 tokens) keeps 97.1% of samples.
