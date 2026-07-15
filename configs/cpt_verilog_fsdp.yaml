@@ -1,0 +1,67 @@
+# ── cpt_verilog_fsdp.yaml ─── Verilog CPT v0.1, FSDP 2xA100 ─────────
+# 37,417 train / 1,000 eval samples, 2 epochs, packing=true
+# Steps/epoch ≈ 9354 (37417 / (1 batch × 2 accum × 2 GPUs))
+# save every 0.5 epoch = 4677 steps, eval every 0.25 epoch = 2338 steps
+# Launch: torchrun --nproc_per_node=2 train_fsdp.py --config configs/cpt_verilog_fsdp.yaml
+
+run:
+  mode: cpt
+  name: vaschpforge-llm-v0.1-full
+  output_dir: results/output_fsdp_full
+
+model:
+  path: /workspace/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  torch_dtype: bfloat16
+  attn_implementation: eager
+  use_cache: false
+  use_mamba_kernels: false
+
+quantization:
+  enabled: false
+
+lora:
+  enabled: true
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.1
+  target_modules: all-linear
+  bias: none
+
+data:
+  train_path: data/verilog/train_full.json
+  eval_path: data/verilog/val_full.json
+  format: text
+  max_seq_length: 1024
+  packing: true
+  num_proc: 4
+
+training:
+  output_dir: ${run.output_dir}
+  num_train_epochs: 2
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 1.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.05
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  logging_steps: 10
+  save_steps: 4677
+  save_total_limit: 7
+  eval_strategy: steps
+  eval_steps: 2338
+  seed: 42
+  dataloader_num_workers: 4
+  gradient_checkpointing: false
+  optim: adamw_torch
+
+wandb:
+  mode: offline
+  project: vaschpforge-llm
+  run_name: v0.1-full-fsdp
+
+logging:
+  level: INFO
