@@ -1,0 +1,64 @@
+# ── cpt_verilog_v0.1.yaml ─── Verilog CPT test run ─────────────────────
+# 10 train samples, 2 val, 2 epochs, wandb enabled
+
+run:
+  mode: cpt
+  name: vaschpforge-llm-v0.1-run
+  output_dir: results/output
+
+model:
+  path: /workspace/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  torch_dtype: bfloat16
+  attn_implementation: eager
+  use_cache: false
+  use_mamba_kernels: false
+
+quantization:
+  enabled: false
+
+lora:
+  enabled: true
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: all-linear
+  bias: none
+
+data:
+  train_path: data/verilog/train_10.json
+  eval_path: data/verilog/val_2.json
+  format: text
+  max_seq_length: 1024
+  packing: false
+  num_proc: 4
+
+training:
+  output_dir: ${run.output_dir}
+  num_train_epochs: 2
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  logging_steps: 1
+  save_steps: 5
+  save_total_limit: 3
+  eval_strategy: steps
+  eval_steps: 5
+  seed: 42
+  dataloader_num_workers: 2
+  gradient_checkpointing: true
+  optim: paged_adamw_8bit
+
+wandb:
+  mode: online
+  project: vaschpforge-llm
+  run_name: v0.1-run
+
+logging:
+  level: INFO
