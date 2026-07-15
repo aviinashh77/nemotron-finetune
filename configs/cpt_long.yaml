@@ -1,0 +1,65 @@
+# ── cpt_long.yaml ── Longer LoRA CPT run on 100 dummy text examples ───────
+run:
+  mode: cpt
+  name: cpt_long_100dp_5ep
+  output_dir: outputs/cpt_long_100dp_5ep
+
+model:
+  path: /workspace/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  torch_dtype: bfloat16
+  attn_implementation: eager
+  use_cache: false
+  use_mamba_kernels: false
+
+quantization:
+  enabled: false
+
+lora:
+  enabled: true
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - up_proj
+    - down_proj
+    - in_proj
+    - out_proj
+  bias: none
+  task_type: CAUSAL_LM
+
+data:
+  train_path: data/dummy/sample_cpt_100.json
+  format: text
+  max_seq_length: 512
+  packing: false
+  num_proc: 1
+
+training:
+  num_train_epochs: 5
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  logging_steps: 1
+  save_steps: 10
+  save_total_limit: 2
+  eval_strategy: no
+  seed: 42
+  dataloader_num_workers: 0
+  gradient_checkpointing: true
+  optim: paged_adamw_8bit
+
+wandb:
+  mode: disabled
+
+logging:
+  level: INFO
