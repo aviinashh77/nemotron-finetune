@@ -2,125 +2,147 @@
 
 Config-driven LoRA finetuning for NVIDIA Nemotron hybrid Mamba-transformer models.
 
-Supports **SFT** (supervised fine-tuning), **CPT** (continued pre-training), and **DAPT** (domain-adaptive pre-training) through a single YAML-configured entrypoint, with local + Weights & Biases logging, checkpointing, and full environment reproducibility.
+Supports **SFT** (supervised fine-tuning), **CPT** (continued pre-training), and **DAPT** (domain-adaptive pre-training) through two distributed strategies: **DDP** (single/multi-GPU replication) and **FSDP** (full parameter sharding for long sequences).
+
+## Status
+
+| Component | Status |
+|-----------|--------|
+| DDP training (`train.py`) | Working — tested up to seq_len=512 on 2xA100 |
+| FSDP training (`train_fsdp.py`) | Working — Verilog CPT running at 28% progress |
+| LoRA CPT | Working — dummy data: loss 1.43 → 0.09, accuracy 64% → 97% |
+| LoRA CPT (Verilog) | Running — 36,321 samples, loss ~0.35–0.55, 87–91% accuracy |
+| LoRA SFT | Working — tested on 5 chat examples |
+| 4-bit quantization | Supported (requires `use_mamba_kernels: false`) |
+| NemotronH compatibility | Patched — TRL `past_key_values` compat via `__getattr__` monkey-patch |
+| `causal_conv1d` | Not available — model falls back to naive Mamba (3x more activation memory) |
+| wandb logging | Working — project `vaschpforge-llm`, offline mode with 100MB buffer |
 
 ## Quick Start
 
-### 1. Run the sample training
+### 1. Install dependencies
 
 ```bash
-python train.py --config configs/sft_sample.yaml
+pip install -r requirements.txt
 ```
 
-This trains Nemotron-Nano-30B for 2 epochs on 5 sample chat datapoints with LoRA (rank 8). Training completes in ~3 minutes on a single A100-80GB.
-
-### 2. Check the outputs
-
-All artifacts are written to the directory specified in `training.output_dir` (default: `outputs/<run_name>/`):
-
-```
-outputs/sft_sample_5dp_2ep/
-├── adapter_model.safetensors    # LoRA weights
-├── adapter_config.json          # LoRA config
-├── resolved_config.yaml         # Full config snapshot (reproducibility)
-├── training_summary.json        # Final metrics
-├── logs/
-│   ├── metrics.jsonl            # Per-step enriched metrics
-│   ├── train.log                # Human-readable log
-│   ├── environment.json         # Hardware/software snapshot
-│   └── run_output.log           # Full stdout/stderr
-└── checkpoint-4/                # Checkpoint at final step
+For FSDP multi-GPU training, also install Mamba kernels (optional):
+```bash
+pip install mamba-ssm --no-build-isolation --no-deps
 ```
 
-### 3. Override config from the CLI
+### 2. Run DDP training (single or multi-GPU)
 
 ```bash
-# Change learning rate
-python train.py --config configs/sft_sample.yaml training.learning_rate=1e-5
+# Single GPU
+python train.py --config configs/cpt_dummy.yaml
 
-# Override multiple fields
-python train.py --config configs/sft_sample.yaml \
-    training.num_train_epochs=5 \
-    training.per_device_train_batch_size=2 \
-    lora.r=32
+# Multi-GPU (DDP — replicates model on each GPU)
+accelerate launch --num_processes 2 --multi_gpu train.py --config configs/cpt_dummy.yaml
+```
+
+### 3. Run FSDP training (multi-GPU, long sequences)
+
+```bash
+# FSDP — shards model across GPUs, enables 5k+ seq_len
+torchrun --nproc_per_node=2 train_fsdp.py --config configs/cpt_fsdp.yaml
+```
+
+### 4. Override config from CLI
+
+```bash
+python train.py --config configs/cpt_dummy.yaml \
+    training.learning_rate=1e-5 \
+    data.max_seq_length=1024 \
+    lora.r=8
 ```
 
 ## Architecture
 
 ```
 nemotron-finetune/
-├── train.py                          # Main entrypoint
+├── train.py                          # DDP entrypoint (single/multi-GPU)
+├── train_fsdp.py                     # FSDP entrypoint (multi-GPU, long sequences)
+├── requirements.txt                  # Pinned dependencies
 ├── configs/
 │   ├── base.yaml                     # All defaults (merged first)
-│   └── sft_sample.yaml               # Example run config
+│   ├── sft_sample.yaml               # Quick SFT demo (5 chat examples)
+│   ├── cpt_dummy.yaml                # CPT test (10 text examples)
+│   ├── cpt_long.yaml                 # Longer CPT (100 examples, 5 epochs)
+│   ├── cpt_fsdp.yaml                 # FSDP long-sequence CPT (seq_len=5120)
+│   └── cpt_verilog_fsdp.yaml         # FSDP Verilog CPT (36k samples, 1 epoch)
 ├── src/nemotron_finetune/
 │   ├── __init__.py                   # Package (v0.1.0)
-│   ├── config.py                     # Config merge + validation
-│   ├── callbacks.py                  # JsonlMetricsCallback
-│   ├── env.py                        # Environment capture
+│   ├── config.py                     # Three-layer config merge + validation
+│   ├── callbacks.py                  # JsonlMetricsCallback (per-step metrics)
+│   ├── env.py                        # Environment/GPU capture
 │   └── logging_utils.py              # Logger + JSON writer
-├── data/dummy/                       # Sample training data
-└── outputs/                          # Training run outputs
+├── data/
+│   ├── dummy/                        # Sample data for testing
+│   └── verilog/                      # Verilog HDL training data
+│       ├── train_full.json           # 36,321 training samples (filtered ≤30k chars)
+│       └── val_full.json             # 971 eval samples
+├── models/
+│   └── NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/  # Model weights + custom code
+├── results/
+│   └── output_fsdp_full/            # Verilog CPT output (in progress)
+├── docs/
+│   ├── SETUP.md                      # Detailed environment setup
+│   ├── ARCHITECTURE.md               # How the code works
+│   ├── CONFIGURATION.md              # Full config reference
+│   ├── DATA_FORMATS.md               # Data format specs
+│   ├── EXPERIMENTS.md                # Experiment logs and results
+│   ├── TROUBLESHOOTING.md            # Known issues and fixes
+│   └── VERILOG_CPT.md                # Verilog CPT project log
+└── outputs/                          # DDP training run outputs
 ```
 
 ### How it works
 
-1. **Config merging** -- `configs/base.yaml` provides all defaults. Your run config is deep-merged on top. CLI dotlist overrides are merged last. The fully-resolved config is saved for reproducibility.
+1. **Config merging** — `configs/base.yaml` provides all defaults. Your run config is deep-merged on top. CLI dotlist overrides are merged last. The fully-resolved config is saved for reproducibility.
 
-2. **Model loading** -- Loads a Nemotron model from a local path or HuggingFace Hub. Supports optional 4-bit NF4 quantization via BitsAndBytes. The `use_mamba_kernels` flag controls whether the Mamba Triton kernels are used (set to `false` when using quantization).
+2. **Model loading** — Loads a Nemotron model from a local path. Supports optional 4-bit NF4 quantization via BitsAndBytes. A monkey-patch adds `past_key_values` to `NemotronHOutput` for TRL compatibility.
 
-3. **LoRA application** -- Uses PEFT to inject LoRA adapters. For standard transformers, set `target_modules: all-linear`. For NemotronH hybrid models, specify explicit target modules (see `sft_sample.yaml`).
+3. **LoRA application** — Uses PEFT to inject LoRA adapters. For NemotronH, the code auto-discovers all `nn.Linear` layers (excluding `lm_head`) as targets.
 
-4. **Training** -- Uses TRL's `SFTTrainer` with gradient checkpointing, cosine LR scheduling, and `paged_adamw_8bit` optimizer by default.
+4. **Distributed training** — Two paths:
+   - **DDP** (`train.py`): Model replicated on each GPU. Fast for short sequences. Limited by single-GPU memory (~512 tokens for 30B bf16 on A100-80GB).
+   - **FSDP** (`train_fsdp.py`): Model sharded across GPUs. Enables long sequences (up to ~5120 tokens on 2xA100-80GB). Uses FSDP-native activation checkpointing.
 
-5. **Logging** -- `JsonlMetricsCallback` enriches each training step with perplexity, throughput (steps/sec, tokens/sec), and GPU memory stats, writing to `logs/metrics.jsonl`. Environment info is captured at run start.
+5. **Training** — Uses TRL's `SFTTrainer` with cosine LR scheduling. Logs perplexity, throughput, and GPU memory to `logs/metrics.jsonl` and optionally to wandb.
 
-## Configuration
+## DDP vs FSDP
 
-The config system uses [OmegaConf](https://omegaconf.readthedocs.io/) with YAML files. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
+| Feature | DDP (`train.py`) | FSDP (`train_fsdp.py`) |
+|---------|-------------------|------------------------|
+| Launch | `accelerate launch` or `python` | `torchrun --nproc_per_node=N` |
+| Model placement | Full copy per GPU | Sharded across GPUs |
+| Max seq_len (2xA100-80GB) | ~512 | ~5120 |
+| GPU memory per device | ~70 GB at seq_len=512 | ~78 GB at seq_len=5120 |
+| Activation checkpointing | `gradient_checkpointing: true` | FSDP `activation_checkpointing` |
+| Optimizer | `paged_adamw_8bit` | `adamw_torch` |
+| Best for | Short sequences, fast iteration | Long sequences, production CPT |
 
-### Minimal SFT config
+### Memory usage (2xA100-80GB, Nemotron-30B bf16)
 
-```yaml
-run:
-  mode: sft
-  name: my_run
-  output_dir: outputs/my_run
-
-model:
-  path: /path/to/nemotron-model
-
-data:
-  train_path: data/train.json
-  format: chat
-```
-
-All other fields fall back to `configs/base.yaml` defaults.
-
-### Key config sections
-
-| Section | Purpose |
-|---------|---------|
-| `run` | Mode (sft/cpt/dapt), run name, output directory |
-| `model` | Model path, dtype, attention implementation |
-| `quantization` | 4-bit NF4 quantization (BitsAndBytes) |
-| `lora` | LoRA rank, alpha, target modules |
-| `data` | Train/eval paths, format, sequence length, packing |
-| `training` | Batch size, LR, epochs, gradient checkpointing, optimizer |
-| `wandb` | Weights & Biases logging mode |
-| `logging` | Log level |
+| Seq Len | Strategy | Peak VRAM/GPU | Status |
+|---------|----------|---------------|--------|
+| 512 | DDP | 70.5 GB | OOM at step 50 |
+| 512 | FSDP | ~46 GB | Works |
+| 2048 | FSDP | ~47 GB | Works |
+| 3072 | FSDP | 67.7 GB | Works (12 GB headroom) |
+| 4096 | FSDP | 76.9 GB | Works (3 GB headroom) |
+| 5120 | FSDP | 78.0 GB | Works (2 GB headroom, limit) |
 
 ## Supported Modes
 
-| Mode | Data Format | Description |
-|------|------------|-------------|
-| `sft` | `chat` or `prompt_completion` | Supervised fine-tuning on instruction data |
-| `cpt` | `text` | Continued pre-training on raw text corpora |
-| `dapt` | `text` | Domain-adaptive pre-training on domain text |
+| Mode | Data Format | Description | Launch |
+|------|------------|-------------|--------|
+| `sft` | `chat` or `prompt_completion` | Supervised fine-tuning on instruction data | `train.py` |
+| `cpt` | `text` | Continued pre-training on raw text corpora | `train.py` or `train_fsdp.py` |
+| `dapt` | `text` | Domain-adaptive pre-training on domain text | `train.py` or `train_fsdp.py` |
 
 ## Data Formats
-
-See [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) for detailed format specifications.
 
 ### Chat format (for SFT)
 
@@ -136,14 +158,6 @@ See [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) for detailed format specificati
 ]
 ```
 
-### Prompt/completion format (for SFT)
-
-```json
-[
-  {"prompt": "What is 2+2?", "completion": "4"}
-]
-```
-
 ### Text format (for CPT/DAPT)
 
 ```json
@@ -152,29 +166,98 @@ See [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) for detailed format specificati
 ]
 ```
 
+See [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) for full specifications.
+
+## Configuration
+
+The config system uses [OmegaConf](https://omegaconf.readthedocs.io/) with YAML files. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
+
+### Verilog CPT config (current active run)
+
+```yaml
+run:
+  mode: cpt
+  name: verilog_cpt_v0.1
+  output_dir: results/output_fsdp_full
+
+model:
+  path: /workspace/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  attn_implementation: eager
+  use_mamba_kernels: false
+
+data:
+  train_path: /workspace/nemotron-finetune/data/verilog/train_full.json
+  eval_path: /workspace/nemotron-finetune/data/verilog/val_full.json
+  format: text
+  max_seq_length: 1024
+
+lora:
+  enabled: true
+  r: 8
+  lora_alpha: 16
+  target_modules:
+    - in_proj
+    - out_proj
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - up_proj
+    - down_proj
+
+training:
+  num_train_epochs: 1
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 1e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  optim: adamw_torch
+
+wandb:
+  mode: offline
+  project: vaschpforge-llm
+```
+
 ## Requirements
 
 - Python 3.12+
 - PyTorch 2.8+ with CUDA 12.8+
 - GPU: A100-80GB or larger (for 30B models without quantization)
+- For FSDP: 2+ GPUs
 
-### Key dependencies
+### Tested dependency versions
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `transformers` | 4.55+ | Model loading, tokenization |
-| `peft` | 0.17+ | LoRA adapters |
-| `trl` | 0.21+ | SFTTrainer |
-| `accelerate` | 1.10+ | Distributed/device management |
-| `datasets` | 5.0+ | Data loading |
-| `bitsandbytes` | 0.44+ | 4-bit quantization |
-| `omegaconf` | 2.3+ | Config management |
-| `mamba-ssm` | 2.3+ | Mamba kernel support |
-| `causal-conv1d` | 1.6+ | Causal convolution support |
+| `torch` | 2.8.0+cu128 | Deep learning framework |
+| `transformers` | 5.13.1 | Model loading, tokenization |
+| `peft` | 0.19.1 | LoRA adapters |
+| `trl` | 1.8.0 | SFTTrainer |
+| `accelerate` | 1.14.0 | Distributed/device management |
+| `datasets` | 5.0.0 | Data loading |
+| `bitsandbytes` | 0.49.2 | 4-bit quantization |
+| `omegaconf` | 2.3.1 | Config management |
+| `mamba-ssm` | 2.3.2.post1 | Mamba kernel support (optional) |
 
-## Troubleshooting
+## Model
 
-See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for known issues and solutions.
+Tested with **NVIDIA-Nemotron-3-Nano-30B-A3B-BF16**:
+- 30B total parameters, 3B active per token (Mixture of Experts)
+- Hybrid Mamba-Transformer architecture with 52 layers
+- Alternating Mamba2Mixer and MOE blocks, with attention at layers 5, 12, 19, 26, 33, 42
+- bf16 weights: ~64 GB
+- Custom modeling code in model directory (not standard transformers)
+
+## Documentation
+
+- [Setup Guide](docs/SETUP.md) — Environment setup, dependency installation, model preparation
+- [Architecture](docs/ARCHITECTURE.md) — How the code works, module-by-module
+- [Configuration Reference](docs/CONFIGURATION.md) — Full config schema
+- [Data Formats](docs/DATA_FORMATS.md) — Data format specifications
+- [Experiments](docs/EXPERIMENTS.md) — Experiment logs, memory benchmarks, results
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — Known issues and fixes
+- [Verilog CPT Log](docs/VERILOG_CPT.md) — Verilog CPT project log and lessons learned
 
 ## License
 
