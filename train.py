@@ -42,8 +42,8 @@ def parse_args():
 
 
 def load_data(cfg: DictConfig):
-    """Load training (and optional eval) data as HuggingFace Dataset."""
-    from datasets import load_dataset
+    """Load training (and optional eval) data as HuggingFace DatasetDict."""
+    from datasets import load_dataset, concatenate_datasets
 
     train_path = cfg.data.train_path
     if train_path is None:
@@ -53,7 +53,24 @@ def load_data(cfg: DictConfig):
     if cfg.data.get("eval_path"):
         data_files["eval"] = str(cfg.data.eval_path)
 
-    raw = load_dataset("json", data_files=data_files, split="train")
+    # No split= here: it would silently drop the eval split.
+    raw = load_dataset("json", data_files=data_files)
+
+    # Replay mixing for CPT/DAPT: blend a general corpus into the domain stream
+    # so narrow-domain training doesn't erode general/instruction ability.
+    # replay_ratio is the fraction of the FINAL mix that is replay data.
+    # Replay file must use the same schema as the train file ({"text": ...}).
+    replay_path = cfg.data.get("replay_path")
+    if replay_path:
+        ratio = float(cfg.data.get("replay_ratio", 0.2))
+        if not 0.0 < ratio < 1.0:
+            raise ValueError(f"data.replay_ratio must be in (0, 1), got {ratio}")
+        seed = int(cfg.training.get("seed", 42))
+        replay = load_dataset("json", data_files={"replay": str(replay_path)})["replay"]
+        replay = replay.select_columns([c for c in raw["train"].column_names if c in replay.column_names])
+        n_replay = min(len(replay), int(len(raw["train"]) * ratio / (1.0 - ratio)))
+        replay = replay.shuffle(seed=seed).select(range(n_replay))
+        raw["train"] = concatenate_datasets([raw["train"], replay]).shuffle(seed=seed)
     return raw
 
 
@@ -79,6 +96,11 @@ def format_prompt_completion(example, tokenizer):
     completion = example.get("completion", "")
     text = f"<|user|>\n{prompt}\n<|assistant|>\n{completion}"
     return {"text": text}
+
+
+# Mamba/SSM module names that should not be LoRA-targeted on NemotronH.
+# in_proj/out_proj are the SSM backbone projections; the rest are SSM internals.
+_MAMBA_SSM_MODULES = {"in_proj", "out_proj", "conv1d", "x_proj", "dt_proj", "A_log", "D", "dt_bias"}
 
 
 def setup_model(cfg: DictConfig):
@@ -169,19 +191,30 @@ def setup_model(cfg: DictConfig):
                 for name, mod in model.named_modules()
                 if isinstance(mod, nn.Linear) and name.split(".")[-1] != "lm_head"
             })
-            # Limit to attention + Mamba projections only (~92 layers) — skip MoE
-            # experts (~5934 layers) which bloat PEFT init time.
-            priority = ["q_proj", "k_proj", "v_proj", "o_proj", "in_proj", "out_proj"]
+            # Attention-only: adapting the Mamba SSM backbone (in_proj/out_proj)
+            # degrades downstream generation in sequential hybrids (arXiv
+            # 2604.22127, MambaPEFT arXiv 2411.03855) — see
+            # docs/VERILOG_CPT_V0.1_POSTMORTEM.md. MoE experts skipped too
+            # (~5934 modules, bloat PEFT init time).
+            priority = ["q_proj", "k_proj", "v_proj", "o_proj"]
             targets = [n for n in priority if n in linear_names]
-            # Include up/down_proj only if explicitly requested or few targets found
-            remaining = [n for n in linear_names if n not in targets]
             if len(targets) < 3:
-                targets += remaining[:3]
+                targets += [n for n in linear_names if n not in targets][:3]
             lora_config.target_modules = targets
             print(f"LoRA targeting: {targets}")
         else:
-            target = list(cfg.lora.target_modules)
-            lora_config.target_modules = target
+            targets = list(cfg.lora.target_modules)
+            risky = sorted(_MAMBA_SSM_MODULES.intersection(targets))
+            if risky:
+                print(
+                    f"WARNING: LoRA targets include Mamba SSM modules {risky}. "
+                    "Adapting the SSM backbone of a sequential hybrid is known to "
+                    "degrade downstream generation (arXiv 2604.22127, MambaPEFT), "
+                    "and out_proj adapters are silently bypassed by the fused "
+                    "mamba kernel path (huggingface/peft#2274). Recommended: "
+                    "attention-only (q_proj, k_proj, v_proj, o_proj)."
+                )
+            lora_config.target_modules = targets
 
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
@@ -214,7 +247,7 @@ def main():
     # Load data
     logger.info("Loading data...")
     raw_dataset = load_data(cfg)
-    logger.info("Dataset loaded: %d examples", len(raw_dataset))
+    logger.info("Dataset loaded: %s", {split: len(ds) for split, ds in raw_dataset.items()})
 
     # Setup model and tokenizer
     logger.info("Loading model and tokenizer...")
@@ -237,11 +270,8 @@ def main():
     # For text format, data is already in the right shape
 
     # Split train/eval if eval data provided
-    train_dataset = raw_dataset
-    eval_dataset = None
-    if "eval" in raw_dataset:
-        eval_dataset = raw_dataset["eval"]
-        train_dataset = raw_dataset["train"]
+    train_dataset = raw_dataset["train"]
+    eval_dataset = raw_dataset["eval"] if "eval" in raw_dataset else None
 
     # Build SFTConfig and SFTTrainer
     from trl import SFTConfig, SFTTrainer
@@ -271,6 +301,11 @@ def main():
         "packing": cfg.data.get("packing", False),
         "dataset_text_field": "text",
     }
+
+    # Non-reentrant checkpointing plays better with PEFT (frozen inputs don't
+    # require grad, which breaks the reentrant variant).
+    if training_kwargs["gradient_checkpointing"]:
+        training_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
 
     max_steps = cfg.training.get("max_steps", -1)
     if max_steps and max_steps > 0:

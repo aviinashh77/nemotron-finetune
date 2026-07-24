@@ -35,6 +35,9 @@ data:
   format: chat            # text | chat | prompt_completion
   max_seq_length: 2048
   packing: false
+  append_eos: true        # append EOS per document before packing (CPT/DAPT)
+  replay_path: null       # optional – general corpus blended in to limit forgetting
+  replay_ratio: 0.2       # fraction of final mix that is replay data
   num_proc: 4
 
 training:

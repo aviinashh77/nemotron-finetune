@@ -187,7 +187,7 @@ Median sample: 686 chars (~200 tokens). Most Verilog modules are short.
 6. **wandb needs env vars set early** — TRL doesn't inherit config values. Set `WANDB_*` env vars before `SFTTrainer` init.
 7. **`SFTConfig` != `SFTTrainer` params** — `max_seq_length` goes to `SFTTrainer`, not `SFTConfig`.
 8. **Naive Mamba is slow but works** — First forward pass can take 10+ minutes. Subsequent steps are ~8s/it.
-9. **Packing is safe for Mamba** — Verified 1.34x speedup with packing=true. Cross-contamination warning can be ignored for CPT.
+9. ~~**Packing is safe for Mamba** — Verified 1.34x speedup with packing=true. Cross-contamination warning can be ignored for CPT.~~ **CORRECTION (post-mortem):** this was wrong. With eager attention there is no block-diagonal masking and the naive Mamba path carries SSM state across packed boundaries; v0.1 additionally packed documents with **no EOS separators**. This is root cause #3 of the pass@1 regression — see [VERILOG_CPT_V0.1_POSTMORTEM.md](VERILOG_CPT_V0.1_POSTMORTEM.md). Packing is only OK with per-document EOS (now default via `data.append_eos`).
 10. **`causal_conv1d` can't build on CUDA 13.0** — Training still works with naive Mamba fallback.
 
 ## Next Steps

@@ -197,7 +197,7 @@ Step time variance is extremely tight (8.14–8.47s), indicating no I/O bottlene
 ## 11. What Worked
 
 1. **Pre-tokenization** — Prevented OOM on 500GB cgroup
-2. **Packing** — 1.34x speedup, safe for Mamba SSM
+2. **Packing** — 1.34x speedup, ~~safe for Mamba SSM~~ (CORRECTED: not safe as configured — no EOS boundaries, state bleed across documents; see [post-mortem](VERILOG_CPT_V0.1_POSTMORTEM.md))
 3. **Filtering long samples** — Kept 97% of data, removed tokenization stalls
 4. **LoRA r=8** — Small but sufficient for syntax learning
 5. **FSDP** — Sharded 64GB model across 2 GPUs, enabled 1024-token sequences
@@ -241,6 +241,8 @@ Step time variance is extremely tight (8.14–8.47s), indicating no I/O bottlene
 ## 15. Verdict
 
 **v0.1 successfully taught Nemotron-30B basic Verilog syntax.** The model went from 83% to 89% token accuracy, with loss dropping 43%. The training was stable, efficient, and produced a usable adapter. The main limitation is capacity (r=8) and data type (raw code vs instruction-tuned).
+
+**⚠️ POST-MORTEM UPDATE:** downstream evaluation later showed SystemVerilog pass@1 dropped 56% → 42% (pass@5 flat). Token accuracy measures corpus fit, not generation quality — the verdict above was premature. Root causes and fixes: [VERILOG_CPT_V0.1_POSTMORTEM.md](VERILOG_CPT_V0.1_POSTMORTEM.md).
 
 ---
 

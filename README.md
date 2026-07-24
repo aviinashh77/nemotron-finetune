@@ -9,9 +9,9 @@ Supports **SFT** (supervised fine-tuning), **CPT** (continued pre-training), and
 | Component | Status |
 |-----------|--------|
 | DDP training (`train.py`) | Working — tested up to seq_len=512 on 2xA100 |
-| FSDP training (`train_fsdp.py`) | Working — Verilog CPT running at 28% progress |
+| FSDP training (`train_fsdp.py`) | Working — Verilog CPT v0.1 completed (16.5h, 7,090 steps) |
 | LoRA CPT | Working — dummy data: loss 1.43 → 0.09, accuracy 64% → 97% |
-| LoRA CPT (Verilog) | Running — 36,321 samples, loss ~0.35–0.55, 87–91% accuracy |
+| LoRA CPT (Verilog) | **v0.1 regressed downstream** — token accuracy 81%→89% but SystemVerilog pass@1 56%→42%; root causes + fixes in [docs/VERILOG_CPT_V0.1_POSTMORTEM.md](docs/VERILOG_CPT_V0.1_POSTMORTEM.md); corrected recipe: `configs/cpt_verilog_v0.2.yaml` |
 | LoRA SFT | Working — tested on 5 chat examples |
 | 4-bit quantization | Supported (requires `use_mamba_kernels: false`) |
 | NemotronH compatibility | Patched — TRL `past_key_values` compat via `__getattr__` monkey-patch |
@@ -172,52 +172,32 @@ See [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) for full specifications.
 
 The config system uses [OmegaConf](https://omegaconf.readthedocs.io/) with YAML files. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
 
-### Verilog CPT config (current active run)
+### Verilog CPT config (v0.2 — corrected recipe)
+
+The v0.1 recipe (seq 1024, LoRA on Mamba `in_proj`/`out_proj`, packing without EOS, no replay data, LR 1e-4) regressed SystemVerilog pass@1 — see the [post-mortem](docs/VERILOG_CPT_V0.1_POSTMORTEM.md). The corrected recipe is [`configs/cpt_verilog_v0.2.yaml`](configs/cpt_verilog_v0.2.yaml); key deltas:
 
 ```yaml
-run:
-  mode: cpt
-  name: verilog_cpt_v0.1
-  output_dir: results/output_fsdp_full
-
 model:
-  path: /workspace/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-  attn_implementation: eager
-  use_mamba_kernels: false
+  use_mamba_kernels: true       # install pinned mamba-ssm + causal-conv1d first
 
 data:
-  train_path: /workspace/nemotron-finetune/data/verilog/train_full.json
-  eval_path: /workspace/nemotron-finetune/data/verilog/val_full.json
-  format: text
-  max_seq_length: 1024
+  max_seq_length: 4096          # was 1024 (pretraining length is 8192)
+  packing: true
+  append_eos: true              # was missing — packed docs had no boundaries
+  replay_path: data/replay/general_code.json   # 20% general-data replay
+  replay_ratio: 0.2
 
 lora:
-  enabled: true
-  r: 8
-  lora_alpha: 16
-  target_modules:
-    - in_proj
-    - out_proj
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
-    - up_proj
-    - down_proj
+  r: 16
+  lora_alpha: 32
+  target_modules: [q_proj, k_proj, v_proj, o_proj]   # attention-only; no Mamba modules
 
 training:
-  num_train_epochs: 1
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 4
-  learning_rate: 1e-4
-  lr_scheduler_type: cosine
-  warmup_ratio: 0.05
-  optim: adamw_torch
-
-wandb:
-  mode: offline
-  project: vaschpforge-llm
+  learning_rate: 2.0e-5         # was 1e-4
+  gradient_checkpointing: true  # HF non-reentrant (validate on GPU)
 ```
+
+Run the GPU-session validation checklist in the post-mortem before launching the full run.
 
 ## Requirements
 
@@ -258,6 +238,7 @@ Tested with **NVIDIA-Nemotron-3-Nano-30B-A3B-BF16**:
 - [Experiments](docs/EXPERIMENTS.md) — Experiment logs, memory benchmarks, results
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — Known issues and fixes
 - [Verilog CPT Log](docs/VERILOG_CPT.md) — Verilog CPT project log and lessons learned
+- [Verilog CPT v0.1 Post-Mortem](docs/VERILOG_CPT_V0.1_POSTMORTEM.md) — root-cause analysis of the pass@1 regression, memory issues, v0.2 recipe rationale, GPU validation checklist
 
 ## License
 

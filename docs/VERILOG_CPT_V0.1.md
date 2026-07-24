@@ -304,9 +304,9 @@ FSDP shards optimizer states across GPUs. `paged_adamw_8bit` uses BitsAndBytes p
 
 FSDP's `activation_checkpointing` creates DTensor wrappers around intermediate activations. NemotronH's custom forward pass (Mamba + MoE + Attention) doesn't produce activations with shapes FSDP expects, causing a silent hang or crash.
 
-### Why Packing Is Safe for Mamba
+### ~~Why Packing Is Safe for Mamba~~ (CORRECTED — this was wrong)
 
-Mamba is a state-space model — it processes tokens sequentially through a recurrence, not through pairwise attention. There's no cross-contamination between packed sequences because the SSM state resets at sequence boundaries (handled by attention mask).
+The original claim ("SSM state resets at sequence boundaries, handled by attention mask") does **not** hold in this setup: the naive Mamba path scans straight across packed boundaries, eager attention applies no block-diagonal mask, and v0.1 packed documents with no EOS separators at all. This is root cause #3 of the SystemVerilog pass@1 regression — see [VERILOG_CPT_V0.1_POSTMORTEM.md](VERILOG_CPT_V0.1_POSTMORTEM.md).
 
 ---
 
@@ -417,7 +417,7 @@ torchrun --nproc_per_node=2 train_fsdp.py --config configs/cpt_verilog_fsdp.yaml
 6. **Save checkpoints frequently** — `save_steps: 4677` only gave 2 checkpoints. Use `save_steps: 1000` or less.
 7. **wandb needs env vars set early** — TRL doesn't inherit config values.
 8. **Naive Mamba is slow but works** — First forward pass takes 10+ minutes, subsequent steps ~8s/it.
-9. **Packing is safe for Mamba** — State-space models don't have cross-sequence attention.
+9. ~~**Packing is safe for Mamba** — State-space models don't have cross-sequence attention.~~ **CORRECTED:** wrong — see §7 and the [post-mortem](VERILOG_CPT_V0.1_POSTMORTEM.md).
 10. **Eval loss tracks train loss** — No overfitting at this scale with LoRA r=8.
 
 ---

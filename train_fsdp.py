@@ -36,7 +36,7 @@ def parse_args():
 
 
 def load_data(cfg):
-    from datasets import load_dataset
+    from datasets import load_dataset, concatenate_datasets
 
     train_path = cfg.data.train_path
     if train_path is None:
@@ -47,6 +47,23 @@ def load_data(cfg):
         data_files["eval"] = str(cfg.data.eval_path)
 
     raw = load_dataset("json", data_files=data_files)
+
+    # Replay mixing for CPT/DAPT: blend a general corpus into the domain stream
+    # so narrow-domain training doesn't erode general/instruction ability
+    # (ChipNeMo used ~9% general data; 10-30% is standard practice).
+    # replay_ratio is the fraction of the FINAL mix that is replay data.
+    # Replay file must use the same schema as the train file ({"text": ...}).
+    replay_path = cfg.data.get("replay_path")
+    if replay_path:
+        ratio = float(cfg.data.get("replay_ratio", 0.2))
+        if not 0.0 < ratio < 1.0:
+            raise ValueError(f"data.replay_ratio must be in (0, 1), got {ratio}")
+        seed = int(cfg.training.get("seed", 42))
+        replay = load_dataset("json", data_files={"replay": str(replay_path)})["replay"]
+        replay = replay.select_columns([c for c in raw["train"].column_names if c in replay.column_names])
+        n_replay = min(len(replay), int(len(raw["train"]) * ratio / (1.0 - ratio)))
+        replay = replay.shuffle(seed=seed).select(range(n_replay))
+        raw["train"] = concatenate_datasets([raw["train"], replay]).shuffle(seed=seed)
     return raw
 
 
@@ -68,6 +85,11 @@ def format_prompt_completion(example, tokenizer):
     completion = example.get("completion", "")
     text = f"<|user|>\n{prompt}\n<|assistant|>\n{completion}"
     return {"text": text}
+
+
+# Mamba/SSM module names that should not be LoRA-targeted on NemotronH.
+# in_proj/out_proj are the SSM backbone projections; the rest are SSM internals.
+_MAMBA_SSM_MODULES = {"in_proj", "out_proj", "conv1d", "x_proj", "dt_proj", "A_log", "D", "dt_bias"}
 
 
 def setup_model(cfg):
@@ -122,8 +144,11 @@ def setup_model(cfg):
                 for name, mod in model.named_modules()
                 if isinstance(mod, nn.Linear) and name.split(".")[-1] != "lm_head"
             })
-            # Attention + Mamba projections only (~92 layers) — skip MoE experts
-            priority = ["q_proj", "k_proj", "v_proj", "o_proj", "in_proj", "out_proj"]
+            # Attention-only: adapting the Mamba SSM backbone (in_proj/out_proj)
+            # degrades downstream generation in sequential hybrids (arXiv
+            # 2604.22127, MambaPEFT arXiv 2411.03855) — see
+            # docs/VERILOG_CPT_V0.1_POSTMORTEM.md. MoE experts skipped too.
+            priority = ["q_proj", "k_proj", "v_proj", "o_proj"]
             targets = [n for n in priority if n in linear_names]
             if len(targets) < 3:
                 targets += [n for n in linear_names if n not in targets][:3]
@@ -131,7 +156,18 @@ def setup_model(cfg):
             if is_main:
                 print(f"LoRA targeting: {targets}")
         else:
-            lora_config.target_modules = list(cfg.lora.target_modules)
+            targets = list(cfg.lora.target_modules)
+            risky = sorted(_MAMBA_SSM_MODULES.intersection(targets))
+            if risky and is_main:
+                print(
+                    f"WARNING: LoRA targets include Mamba SSM modules {risky}. "
+                    "Adapting the SSM backbone of a sequential hybrid is known to "
+                    "degrade downstream generation (arXiv 2604.22127, MambaPEFT), "
+                    "and out_proj adapters are silently bypassed by the fused "
+                    "mamba kernel path (huggingface/peft#2274). Recommended: "
+                    "attention-only (q_proj, k_proj, v_proj, o_proj)."
+                )
+            lora_config.target_modules = targets
 
         model = get_peft_model(model, lora_config)
         if is_main:
@@ -172,6 +208,37 @@ def _patch_nemotron_output(is_main: bool):
     except Exception as e:
         if is_main:
             print(f"Warning: Could not patch NemotronH output classes: {e}")
+
+
+def _make_sharding_diag_callback():
+    """Callback logging per-rank on-GPU parameter bytes after the first step.
+
+    HF Trainer auto-wrap can silently fail to shard Mamba2/hybrid layers
+    (transformers#36982), leaving near-full model weights on every rank. With
+    working FSDP full_shard on N ranks, expect roughly total_model_bytes / N.
+    """
+    from transformers import TrainerCallback
+
+    class ShardingDiagnosticsCallback(TrainerCallback):
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if state.global_step == 1 and model is not None:
+                seen = set()
+                total = 0
+                for p in model.parameters():
+                    if p.device.type == "cuda" and id(p) not in seen:
+                        seen.add(id(p))
+                        total += p.numel() * p.element_size()
+                rank = int(os.environ.get("RANK", 0))
+                world = int(os.environ.get("WORLD_SIZE", 1))
+                print(
+                    f"[FSDP diag][rank {rank}] on-GPU parameter bytes after "
+                    f"step 1: {total / 1e9:.1f} GB (full_shard target ~= "
+                    f"model_size / {world}; near-full model size means "
+                    f"sharding failed — see transformers#36982)"
+                )
+            return control
+
+    return ShardingDiagnosticsCallback()
 
 
 def main():
@@ -216,7 +283,7 @@ def main():
 
     logger.info("Loading data...")
     raw_dataset = load_data(cfg)
-    logger.info("Dataset loaded: %d examples", len(raw_dataset))
+    logger.info("Dataset loaded: %s", {split: len(ds) for split, ds in raw_dataset.items()})
 
     # Format data (chat template or prompt_completion)
     data_format = cfg.data.get("format", "chat")
@@ -234,11 +301,8 @@ def main():
             desc="Formatting prompt/completion data",
         )
 
-    train_dataset = raw_dataset
-    eval_dataset = None
-    if "eval" in raw_dataset:
-        eval_dataset = raw_dataset["eval"]
-        train_dataset = raw_dataset["train"]
+    train_dataset = raw_dataset["train"]
+    eval_dataset = raw_dataset["eval"] if "eval" in raw_dataset else None
 
     # Pre-tokenize to Arrow cache on disk (avoids OOM during SFTTrainer init)
     max_seq_len = cfg.data.get("max_seq_length", 2048)
@@ -246,15 +310,33 @@ def main():
     cache_dir = os.path.join(cfg.run.output_dir, "tokenize_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
-    logger.info("Pre-tokenizing train dataset (max_seq_length=%d, packing=%s)...", max_seq_len, packing)
-    from datasets import Dataset
+    # Append EOS to every document so packed streams have boundaries. Without
+    # it, packing concatenates unrelated documents with no separator — the
+    # model never sees where one ends, which damages termination behavior at
+    # generation time (root cause #3 in docs/VERILOG_CPT_V0.1_POSTMORTEM.md).
+    append_eos = bool(cfg.data.get("append_eos", True))
+    eos_id = tokenizer.eos_token_id
+    if append_eos and eos_id is None:
+        logger.warning("data.append_eos=true but tokenizer has no eos_token_id; skipping")
+        append_eos = False
+
+    logger.info(
+        "Pre-tokenizing train dataset (max_seq_length=%d, packing=%s, append_eos=%s)...",
+        max_seq_len, packing, append_eos,
+    )
     def _tokenize_fn(examples):
-        return tokenizer(
+        out = tokenizer(
             examples["text"],
             truncation=True,
-            max_length=max_seq_len,
+            max_length=max_seq_len - 1 if append_eos else max_seq_len,
             padding=False,
         )
+        if append_eos:
+            for ids, mask in zip(out["input_ids"], out["attention_mask"]):
+                if not ids or ids[-1] != eos_id:
+                    ids.append(eos_id)
+                    mask.append(1)
+        return out
     tokenized_train = train_dataset.map(
         _tokenize_fn,
         batched=True,
@@ -311,6 +393,10 @@ def main():
         "gradient_checkpointing": cfg.training.get("gradient_checkpointing", False),
         "optim": cfg.training.get("optim", "adamw_torch"),
         "report_to": "none" if cfg.wandb.get("mode") == "disabled" else "wandb",
+        # SFTConfig's max_length (default 1024) is the packing bin size —
+        # without this, packed rows silently get re-chunked to 1024 no matter
+        # what data.max_seq_length says.
+        "max_length": max_seq_len,
         "packing": packing,
         "fsdp": "full_shard auto_wrap",
         "fsdp_config": {
@@ -320,6 +406,12 @@ def main():
             "use_orig_params": "true",
         },
     }
+
+    # Non-reentrant HF gradient checkpointing (a different mechanism than the
+    # FSDP-native activation_checkpointing that crashed with DTensor mismatches
+    # on NemotronH — validate on GPU, disable via config if it hangs).
+    if training_kwargs["gradient_checkpointing"]:
+        training_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
 
     max_steps = cfg.training.get("max_steps", -1)
     if max_steps and max_steps > 0:
@@ -334,7 +426,7 @@ def main():
     sft_config = SFTConfig(**training_kwargs)
 
     from nemotron_finetune.callbacks import JsonlMetricsCallback
-    callbacks = [JsonlMetricsCallback(cfg.run.output_dir)]
+    callbacks = [JsonlMetricsCallback(cfg.run.output_dir), _make_sharding_diag_callback()]
 
     trainer = SFTTrainer(
         model=model,

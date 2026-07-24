@@ -19,15 +19,12 @@ lora:
   r: 8
   lora_alpha: 16
   lora_dropout: 0.05
+  # Attention-only — no Mamba SSM modules (see docs/VERILOG_CPT_V0.1_POSTMORTEM.md)
   target_modules:
     - q_proj
     - k_proj
     - v_proj
     - o_proj
-    - up_proj
-    - down_proj
-    - in_proj
-    - out_proj
   bias: none
   task_type: CAUSAL_LM
 
