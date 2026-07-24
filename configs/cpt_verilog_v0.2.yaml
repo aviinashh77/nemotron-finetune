@@ -1,0 +1,91 @@
+# ── cpt_verilog_v0.2.yaml ─── Verilog CPT v0.2, FSDP 2xA100 ────────────
+# Corrected recipe after the v0.1 post-mortem — every delta from v0.1 is
+# annotated below. Full analysis: docs/VERILOG_CPT_V0.1_POSTMORTEM.md
+# Launch: torchrun --nproc_per_node=2 train_fsdp.py --config configs/cpt_verilog_v0.2.yaml
+#
+# BEFORE launching, run the GPU-session validation checklist in the
+# post-mortem doc (kernel install, 50-step smoke test, sharding diag,
+# mid-run decode sanity check, base-vs-adapter benchmark).
+
+run:
+  mode: cpt
+  name: vaschpforge-llm-v0.2-full
+  output_dir: results/output_v0.2
+
+model:
+  path: /workspace/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  torch_dtype: bfloat16
+  attn_implementation: eager    # NemotronH: no flash-attn2 support yet
+  use_cache: false
+  # v0.1 ran the naive fallback (~3x activation memory, ~10x slower).
+  # Install pinned mamba-ssm + causal-conv1d on the GPU box and set true.
+  use_mamba_kernels: true
+
+quantization:
+  enabled: false                # QLoRA not cleanly supported on hybrid MoE
+
+lora:
+  enabled: true
+  r: 16                         # v0.1: r=8 — more capacity
+  lora_alpha: 32
+  lora_dropout: 0.05
+  # v0.1 targeted in_proj/out_proj (Mamba SSM backbone) — a likely root
+  # cause of the pass@1 regression. Attention-only is the recommended
+  # placement for sequential hybrids (arXiv 2604.22127, MambaPEFT).
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+  bias: none
+
+data:
+  train_path: data/verilog/train_full.json
+  eval_path: data/verilog/val_full.json
+  format: text
+  # v0.1: 1024 (8x below the model's 8192 pretraining length; truncated
+  # ~17% of docs mid-module). 4096 covers ~95% of docs; try 8192 if the
+  # kernels + gradient checkpointing leave VRAM headroom.
+  max_seq_length: 4096
+  packing: true
+  append_eos: true              # v0.1 packed documents with NO boundaries
+  # Replay: point at a general code/text corpus ({"text": ...} JSON) to
+  # blend 20% general data — prevents the mode-sharpening that tanked
+  # pass@1 in v0.1 (ChipNeMo-style). REQUIRED before launching v0.2.
+  replay_path: data/replay/general_code.json
+  replay_ratio: 0.2
+  num_proc: 4
+
+training:
+  output_dir: ${run.output_dir}
+  num_train_epochs: 2
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8   # effective batch 16 @ 4096 = 65k tok/step
+  learning_rate: 2.0e-5            # v0.1: 1e-4 — ChipNeMo-style conservative CPT LR
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.05
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  logging_steps: 10
+  save_steps: 500                  # v0.1: 4677 (only 2 checkpoints)
+  save_total_limit: 5
+  eval_strategy: steps
+  eval_steps: 500                  # v0.1: 2338 (only 4 eval points)
+  seed: 42
+  dataloader_num_workers: 4
+  # Non-reentrant HF checkpointing (train_fsdp.py sets use_reentrant=False).
+  # Different mechanism than the FSDP-native AC that crashed in v0.1 —
+  # validate on the 50-step smoke test; set false if it hangs.
+  gradient_checkpointing: true
+  optim: adamw_torch
+
+wandb:
+  mode: offline
+  project: vaschpforge-llm
+  run_name: v0.2-full-fsdp
+
+logging:
+  level: INFO
